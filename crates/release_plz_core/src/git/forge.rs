@@ -12,7 +12,8 @@ use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{debug, info, instrument};
+use tokio::time::sleep;
+use tracing::{debug, info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub enum GitForge {
@@ -564,16 +565,29 @@ impl GitClient {
             }),
         };
 
-        let rep = self
-            .client
-            .post(self.pulls_url())
-            .json(&json_body)
-            .send()
-            .await
-            .context("failed when sending the response")?
-            .successful_status()
-            .await
-            .context("received unexpected response")?;
+        let mut tries = 0;
+        let rep = loop {
+            if tries >= 3 {
+                anyhow::bail!("Failed to open PR after 3 attempts");
+            }
+            tries += 1;
+
+            let rep = self
+                .client
+                .post(self.pulls_url())
+                .json(&json_body)
+                .send()
+                .await
+                .context("failed when sending the response")?;
+
+            match rep.successful_status().await {
+                Ok(rep) => break rep,
+                Err(err) => {
+                    warn!("Failed to open PR, retrying ({tries}/3): {err}");
+                    sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        };
 
         let git_pr: GitPr = match self.forge {
             ForgeType::Github | ForgeType::Gitea => {
